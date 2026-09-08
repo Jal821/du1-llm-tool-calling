@@ -4,15 +4,24 @@ A Python script that calls an LLM API, lets the model pick a tool, executes that
 tool and **sends the result back to the model**, which turns it into the final
 answer.
 
-API used: **Google Gemini** (`google-genai`), model `gemini-3.7-flash`.
+Two interchangeable backends, both driven by the same tool definitions:
+
+| Backend | API | Protocol |
+| --- | --- | --- |
+| `gemini` (default) | Google Gemini via `google-genai` | Gemini native function calling |
+| `openai` | any OpenAI-compatible endpoint, e.g. a local LiteLLM proxy | OpenAI `tools` / `tool_calls` |
+
+Tool calling is the same idea in two different wire formats. The tools live in
+`tools.py` as plain JSON Schema and each backend converts them to its own shape,
+so a tool is described in exactly one place and the two cannot drift apart.
 
 ## The assignment and how it is met
 
 | Requirement | Where in the code |
 | --- | --- |
-| Call an LLM API | `main.py`, `client.models.generate_content()` |
-| Use a tool (a calculation function) | `tools.py`, three pure calculation functions |
-| Return the result back to the LLM | `main.py`, `types.Part.from_function_response()` and the loop |
+| Call an LLM API | `main.py`, `client.models.generate_content()` (Gemini) or `client.chat.completions.create()` (OpenAI-compatible) |
+| Use a tool (a calculation function) | `tools.py`, three pure calculation functions plus their schemas |
+| Return the result back to the LLM | `main.py`, `types.Part.from_function_response()` (Gemini) or a `tool`-role message keyed to the call id (OpenAI-compatible) |
 
 ## Domain: mortgage advisor
 
@@ -101,14 +110,43 @@ uv run main.py "How much interest would I pay on a 50 000 EUR loan over 10 years
 Get a key at <https://aistudio.google.com/apikey>. The `.env` file is in
 `.gitignore` and never reaches the repository.
 
+### Choosing a backend
+
+By default the script talks straight to Google Gemini, which only needs a free
+key from AI Studio. That is the path to use if you just want to run this.
+
+To use an OpenAI-compatible endpoint instead, set `OPENAI_BASE_URL` in `.env`:
+
+```
+OPENAI_BASE_URL=http://localhost:20128/v1
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=auto/best-fast
+```
+
+The backend is then picked automatically, and `--backend` forces either one:
+
+```bash
+uv run main.py --backend gemini --income 2000
+uv run main.py --backend openai --income 2000
+```
+
+The first line of the output always says which backend and model ran:
+
+```
+BACKEND: openai, model auto/best-fast at http://localhost:20128/v1
+```
+
+Note that the calculation layer is identical either way. Both backends produce
+the same figures because `tools.py` never touches an API.
+
 ### Model and quotas
 
-The free tier has a daily request limit **per model**. When it runs out, the
-script says so in one sentence instead of a traceback:
+On the Gemini backend the free tier has a daily request limit **per model**.
+When it runs out, the script says so in one sentence instead of a traceback:
 
 ```
 Gemini API quota exhausted (the free tier has a daily limit per model,
-here gemini-3.7-flash). Try later or change MODEL.
+here gemini-3.7-flash). Try later or change GEMINI_MODEL.
 ```
 
 The model can be switched without touching the code:
@@ -218,8 +256,8 @@ rate. A fixed tolerance would report an error on long loans where there is none.
 ## Layout
 
 ```
-main.py          API call, tool declarations, agent loop, CLI
-tools.py         calculation functions, no API dependency
+main.py          both backends, agent loops, CLI
+tools.py         calculation functions plus the shared tool schemas
 test_tools.py    independent verification, no API calls
 .env.example     template for the API key
 ```
