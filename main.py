@@ -15,7 +15,7 @@ import sys
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from nastroje import DOSTUPNE_FUNKCE
 
@@ -26,7 +26,9 @@ load_dotenv()
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-MODEL = "gemini-3.6-flash"
+# Model lze prepsat pres .env nebo promennou prostredi, kdyby free tier
+# vycerpal denni kvotu prave na tomto modelu.
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 MAX_KROKU = 8  # pojistka proti nekonecne smycce
 
 VYCHOZI_SAZBA = 4.9
@@ -39,8 +41,10 @@ NASTROJE = types.Tool(
         types.FunctionDeclaration(
             name="max_hypoteka",
             description=(
-                "Spocita maximalni vysi hypoteky, kterou uzivatel dostane, "
-                "z jeho cisteho mesicniho prijmu. Pouzij vzdy, kdyz uzivatel "
+                "Spocita, jak velkou hypoteku jeste muze uzivatel dostat. "
+                "Zakonny strop je osminasobek cisteho ROCNIHO prijmu a plati "
+                "na soucet vsech hypotek dane osoby, takze uz splacene "
+                "hypoteky se od stropu odectou. Pouzij vzdy, kdyz uzivatel "
                 "uvede svuj cisty prijem a chce vedet, na kolik ma narok. "
                 "Pokud uzivatel uvede rocni prijem, vydel ho dvanacti."
             ),
@@ -50,6 +54,13 @@ NASTROJE = types.Tool(
                     "cisty_mesicni_prijem": types.Schema(
                         type=types.Type.NUMBER,
                         description="Cisty mesicni prijem v eurech, napr. 2000",
+                    ),
+                    "existujici_hypoteky": types.Schema(
+                        type=types.Type.NUMBER,
+                        description=(
+                            "Zustatek uz splacenych hypotek osoby v eurech. "
+                            "Pokud uzivatel zadnou nema, pouzij 0."
+                        ),
                     ),
                 },
                 required=["cisty_mesicni_prijem"],
@@ -150,9 +161,24 @@ def spust_agenta(dotaz: str) -> str:
     print(f"DOTAZ UZIVATELE:\n  {dotaz}\n")
 
     for krok in range(1, MAX_KROKU + 1):
-        odpoved = client.models.generate_content(
-            model=MODEL, contents=obsah, config=config
-        )
+        try:
+            odpoved = client.models.generate_content(
+                model=MODEL, contents=obsah, config=config
+            )
+        except errors.ClientError as chyba:
+            # Nejcasteji vycerpana kvota free tier (429) nebo neplatny klic (400).
+            if chyba.code == 429:
+                sys.exit(
+                    "Vycerpana kvota Gemini API (free tier ma denni limit "
+                    f"na model {MODEL}). Zkus to pozdeji nebo zmen MODEL."
+                )
+            sys.exit(f"Gemini API odmitlo pozadavek ({chyba.code}): {chyba.message}")
+        except errors.ServerError as chyba:
+            sys.exit(
+                f"Gemini API je docasne nedostupne ({chyba.code}). "
+                "Jde o preteceni na strane Google, zkus to za chvili znovu."
+            )
+
         kandidat = odpoved.candidates[0]
 
         # Odpoved modelu se musi vratit do historie, jinak model v dalsim
@@ -191,8 +217,13 @@ def spust_agenta(dotaz: str) -> str:
 def sestav_dotaz(args) -> str:
     """Z prijmu poskladá dotaz, jinak vezme volny text z prikazove radky."""
     if args.prijem is not None:
+        soucasne = (
+            f"Uz mam hypoteky se zustatkem {args.dluhy} EUR. "
+            if args.dluhy
+            else "Zadnou hypoteku zatim nemam. "
+        )
         return (
-            f"Muj cisty mesicni prijem je {args.prijem} EUR. "
+            f"Muj cisty mesicni prijem je {args.prijem} EUR. {soucasne}"
             f"Na jak velkou hypoteku mam narok, jaka bude mesicni splatka "
             f"a kolik celkem zaplatim na urocich, pri sazbe {args.sazba} % p.a. "
             f"a dobe splaceni {args.roky} let?"
@@ -215,6 +246,15 @@ if __name__ == "__main__":
         help=(
             "Cisty mesicni prijem v EUR. Spocita maximalni hypoteku "
             "(8x cisty rocni prijem), splatku i uroky."
+        ),
+    )
+    parser.add_argument(
+        "--dluhy",
+        type=float,
+        default=0,
+        help=(
+            "Zustatek uz splacenych hypotek v EUR. Odecte se od zakonneho "
+            "stropu, protoze ten plati na soucet vsech hypotek (vychozi 0)."
         ),
     )
     parser.add_argument(

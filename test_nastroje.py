@@ -40,8 +40,25 @@ def povolena_odchylka(urokova_sazba, pocet_splatek):
 def test_max_hypoteka_je_osminasobek_rocniho_prijmu():
     vysledek = max_hypoteka(2000)
     assert vysledek["cisty_rocni_prijem"] == 24_000
-    assert vysledek["max_hypoteka"] == 24_000 * NASOBEK_ROCNIHO_PRIJMU == 192_000
+    assert vysledek["zakonny_strop_celkem"] == 24_000 * NASOBEK_ROCNIHO_PRIJMU
+    assert vysledek["max_hypoteka"] == 192_000
     print(f"OK max hypoteka {vysledek['max_hypoteka']} EUR pri prijmu 2000 EUR")
+
+
+def test_existujici_hypoteka_se_odecte_od_stropu():
+    """Strop plati na soucet vsech hypotek osoby, ne na kazdou zvlast."""
+    vysledek = max_hypoteka(2000, existujici_hypoteky=50_000)
+    assert vysledek["zakonny_strop_celkem"] == 192_000
+    assert vysledek["max_hypoteka"] == 142_000
+    print(f"OK pri 50 000 EUR existujici hypoteky zbyva {vysledek['max_hypoteka']} EUR")
+
+
+def test_vycerpany_strop_vraci_nulu_a_poznamku():
+    vysledek = max_hypoteka(2000, existujici_hypoteky=250_000)
+    assert vysledek["max_hypoteka"] == 0
+    assert "poznamka" in vysledek
+    assert "error" not in vysledek  # vycerpany strop je platny vysledek, ne chyba
+    print("OK vycerpany strop vraci 0 EUR a poznamku")
 
 
 def test_splatka_uveru_dosplati_na_nulu():
@@ -93,6 +110,7 @@ def test_neplatny_vstup_vraci_chybu_a_nespadne():
     for spatny in [
         max_hypoteka(0),
         max_hypoteka(-500),
+        max_hypoteka(2000, existujici_hypoteky=-1),
         mesicni_splatka(-1, 5, 20),
         mesicni_splatka(100, -5, 20),
         mesicni_splatka(100, 5, 0),
@@ -104,6 +122,8 @@ def test_neplatny_vstup_vraci_chybu_a_nespadne():
 
 if __name__ == "__main__":
     test_max_hypoteka_je_osminasobek_rocniho_prijmu()
+    test_existujici_hypoteka_se_odecte_od_stropu()
+    test_vycerpany_strop_vraci_nulu_a_poznamku()
     test_splatka_uveru_dosplati_na_nulu()
     test_nulovy_urok_je_jen_deleni()
     test_celkove_naklady_navazuji_na_splatku()

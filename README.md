@@ -20,7 +20,7 @@ Tři nástroje, přičemž **každý pracuje s výstupem předchozího**. To je 
 
 | Nástroj | Vstupy | Výstup |
 | --- | --- | --- |
-| `max_hypoteka` | čistý měsíční příjem | maximální výše hypotéky (8× čistý roční příjem) |
+| `max_hypoteka` | čistý měsíční příjem, zůstatek existujících hypoték | kolik ještě zbývá do zákonného stropu (8× čistý roční příjem) |
 | `mesicni_splatka` | jistina, úroková sazba p.a., doba v letech | měsíční anuitní splátka |
 | `celkove_naklady` | měsíční splátka, doba v letech, jistina | celkem zaplaceno, úroky celkem |
 
@@ -66,14 +66,29 @@ cp .env.example .env      # a vyplň GEMINI_API_KEY
 
 ```bash
 uv run main.py --prijem 2000
+uv run main.py --prijem 2000 --dluhy 50000
 uv run main.py --prijem 2500 --sazba 5.2 --roky 25
 ```
 
 | Parametr | Význam | Výchozí |
 | --- | --- | --- |
 | `--prijem` | čistý měsíční příjem v EUR | — |
+| `--dluhy` | zůstatek už splácených hypoték v EUR, odečte se od stropu | 0 |
 | `--sazba` | roční úroková sazba v % | 4.9 |
 | `--roky` | doba splácení v letech | 30 |
+
+Existující hypotéky se odečítají, protože zákonný strop platí na **součet
+všech** hypoték osoby:
+
+```
+$ uv run main.py --prijem 2000 --dluhy 50000
+
+[krok 1] max_hypoteka  → {'zakonny_strop_celkem': 192000,
+                          'existujici_hypoteky': 50000,
+                          'max_hypoteka': 142000}
+[krok 2] mesicni_splatka(142000, 4.9, 30)  → 753.63 EUR
+[krok 3] celkove_naklady(753.63, 30, 142000) → 129 306.80 EUR uroku
+```
 
 **Volný dotaz** místo parametrů:
 
@@ -83,6 +98,24 @@ uv run main.py "Kolik zaplatim na urocich u uveru 50 000 EUR na 10 let pri 6 %?"
 
 Klíč se získá na <https://aistudio.google.com/apikey>. Soubor `.env` je
 v `.gitignore` a do repozitáře se nikdy nedostane.
+
+### Model a kvóty
+
+Free tier má denní limit na požadavky **na jeden model**. Když se vyčerpá,
+skript to řekne jednou větou místo tracebacku:
+
+```
+Vycerpana kvota Gemini API (free tier ma denni limit na model gemini-3.6-flash).
+Zkus to pozdeji nebo zmen MODEL.
+```
+
+Model se dá přepnout bez zásahu do kódu:
+
+```bash
+GEMINI_MODEL=gemini-3.5-flash uv run main.py --prijem 2000
+```
+
+Ošetřeno je i 503 (přetížení na straně Google) a neplatný klíč.
 
 ## Ukázkový výstup
 
@@ -149,6 +182,8 @@ případnou chybu. Místo toho se úvěr odsimuluje měsíc po měsíci a kontro
 
 ```
 OK max hypoteka 192000 EUR pri prijmu 2000 EUR
+OK pri 50 000 EUR existujici hypoteky zbyva 142000 EUR
+OK vycerpany strop vraci 0 EUR a poznamku
 OK splatka 810.29 EUR, zustatek 0.0327 EUR (limit 2.9435)
 OK nulovy urok
 OK uroky 116778.4 EUR
@@ -176,6 +211,14 @@ bez sítě a bez klíče.
 
 ## Poznámka k pravidlu 8× roční příjem
 
+Osminásobek čistého **ročního** příjmu je regulatorní strop na **celkové
+hypoteční zadlužení jedné osoby**, nikoli odhad konkrétní banky. Protože platí
+na součet všech hypoték, nástroj od stropu odečítá zůstatek už splácených
+hypoték — parametr `--dluhy`.
+
 Násobek je v `nastroje.py` konstanta `NASOBEK_ROCNIHO_PRIJMU = 8`, takže se dá
-změnit na jednom místě. Jde o zjednodušené pravidlo pro účely úkolu — reálná
-banka posuzuje i DTI, DSTI, LTV a výdaje domácnosti.
+změnit na jednom místě, kdyby se limit posunul.
+
+Strop je horní hranice, ne příslib. Banka nad ním posuzuje ještě DSTI (podíl
+splátky na příjmu) a LTV (podíl k hodnotě nemovitosti), takže výsledná
+schválená částka může být nižší, nikdy ne vyšší.

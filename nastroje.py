@@ -5,24 +5,43 @@ takze chybu dostane model jako vysledek nastroje a muze na ni reagovat.
 Zadna funkce nevyhazuje vyjimku do smycky agenta.
 """
 
-# Kolikanasobek cisteho ROCNIHO prijmu banka pujci.
+# Zakonny strop na CELKOVE hypotecni zadluzeni jedne osoby:
+# osminasobek cisteho ROCNIHO prijmu. Neni to odhad banky, ale regulatorni
+# limit, ktery plati na soucet vsech hypotek dane osoby.
 NASOBEK_ROCNIHO_PRIJMU = 8
 
 
-def max_hypoteka(cisty_mesicni_prijem: float) -> dict:
-    """Spocita maximalni vysi hypoteky z cisteho mesicniho prijmu."""
+def max_hypoteka(cisty_mesicni_prijem: float, existujici_hypoteky: float = 0) -> dict:
+    """Spocita, kolik jeste muze osoba dostat, do zakonneho stropu.
+
+    Strop je osminasobek cisteho rocniho prijmu a plati na soucet vsech
+    hypotek osoby. Uz splacene hypoteky se proto od stropu odectou.
+    """
     if cisty_mesicni_prijem <= 0:
         return {"error": "Cisty mesicni prijem musi byt vetsi nez nula."}
+    if existujici_hypoteky < 0:
+        return {"error": "Existujici hypoteky nemohou byt negativni."}
 
     cisty_rocni_prijem = cisty_mesicni_prijem * 12
-    maximum = cisty_rocni_prijem * NASOBEK_ROCNIHO_PRIJMU
+    zakonny_strop = cisty_rocni_prijem * NASOBEK_ROCNIHO_PRIJMU
+    zbyva = zakonny_strop - existujici_hypoteky
 
-    return {
+    vysledek = {
         "cisty_mesicni_prijem": round(cisty_mesicni_prijem, 2),
         "cisty_rocni_prijem": round(cisty_rocni_prijem, 2),
-        "max_hypoteka": round(maximum, 2),
+        "zakonny_strop_celkem": round(zakonny_strop, 2),
+        "existujici_hypoteky": round(existujici_hypoteky, 2),
+        "max_hypoteka": round(max(zbyva, 0), 2),
         "pouzity_nasobek": NASOBEK_ROCNIHO_PRIJMU,
     }
+
+    if zbyva <= 0:
+        vysledek["poznamka"] = (
+            "Zakonny strop je jiz vycerpan existujicimi hypotekami, "
+            "dalsi hypoteku nelze poskytnout."
+        )
+
+    return vysledek
 
 
 def mesicni_splatka(jistina: float, urokova_sazba: float, doba_v_letech: float) -> dict:
