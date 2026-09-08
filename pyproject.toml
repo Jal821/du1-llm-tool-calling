@@ -1,0 +1,10 @@
+[project]
+name = "du1-llm-tool-calling"
+version = "0.1.0"
+description = "DU1 - Python skript, ktery vola LLM API, pouzije nastroj a vrati vysledek zpet modelu"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai>=1.0.0",
+    "python-dotenv>=1.0.1",
+]
