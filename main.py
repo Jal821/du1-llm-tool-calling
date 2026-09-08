@@ -1,12 +1,13 @@
-"""Domaci ukol 1 - LLM API + volani nastroju (function calling).
+"""Homework 1 - LLM API with tool calling (function calling).
 
-Skript zavola Gemini API, model si sam vybere nastroj, skript nastroj
-vykona a vysledek posle zpet modelu. Smycka bezi tak dlouho, dokud model
-chce volat dalsi nastroje.
+The script calls the Gemini API, the model picks a tool itself, the script
+executes that tool and sends the result back to the model. The loop keeps
+running as long as the model wants to call more tools.
 
-Nastroje se retezi: z cisteho prijmu se spocita maximalni hypoteka,
-z ni mesicni splatka a z te celkove uroky. Kazdy krok pracuje s vystupem
-predchoziho, takze nejde o jedno izolovane volani.
+The tools chain: net income gives the maximum mortgage, that gives the
+monthly payment, and that gives the total interest. Each step works on the
+output of the previous one, so this is real chaining rather than a single
+isolated call.
 """
 
 import argparse
@@ -17,263 +18,267 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
 
-from nastroje import DOSTUPNE_FUNKCE
+from tools import AVAILABLE_FUNCTIONS
 
 load_dotenv()
 
-# Windows konzole jede v cp1252 a na ceske diakritice by spadla
-# na UnicodeEncodeError. Vystup proto prepneme na UTF-8.
+# The Windows console runs in cp1252 and would die with a UnicodeEncodeError
+# on non-ASCII output, so switch stdout to UTF-8.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# Model lze prepsat pres .env nebo promennou prostredi, kdyby free tier
-# vycerpal denni kvotu prave na tomto modelu.
+# The model can be overridden through .env or an environment variable, in
+# case the free tier runs out of daily quota on this particular model.
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-MAX_KROKU = 8  # pojistka proti nekonecne smycce
+MAX_STEPS = 8  # guard against an endless loop
 
-VYCHOZI_SAZBA = 4.9
-VYCHOZI_DOBA = 30
+DEFAULT_RATE = 4.9
+DEFAULT_YEARS = 30
 
-# Deklarace nastroju pro model. Popisy jsou to jedine, podle ceho se model
-# rozhoduje, ktery nastroj zavolat, takze musi byt konkretni.
-NASTROJE = types.Tool(
+# Tool declarations for the model. The descriptions are the only thing the
+# model uses to decide which tool to call, so they have to be specific.
+TOOLS = types.Tool(
     function_declarations=[
         types.FunctionDeclaration(
-            name="max_hypoteka",
+            name="max_mortgage",
             description=(
-                "Spocita, jak velkou hypoteku jeste muze uzivatel dostat. "
-                "Zakonny strop je osminasobek cisteho ROCNIHO prijmu a plati "
-                "na soucet vsech hypotek dane osoby, takze uz splacene "
-                "hypoteky se od stropu odectou. Pouzij vzdy, kdyz uzivatel "
-                "uvede svuj cisty prijem a chce vedet, na kolik ma narok. "
-                "Pokud uzivatel uvede rocni prijem, vydel ho dvanacti."
+                "Work out how large a mortgage the user can still get. The "
+                "legal cap is eight times their net YEARLY income and it "
+                "applies to the sum of all mortgages that person holds, so "
+                "any existing mortgage balance is subtracted from the cap. "
+                "Use this whenever the user states their net income and "
+                "wants to know how much they qualify for. If the user gives "
+                "a yearly income, divide it by twelve."
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
-                    "cisty_mesicni_prijem": types.Schema(
+                    "net_monthly_income": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Cisty mesicni prijem v eurech, napr. 2000",
+                        description="Net monthly income in euros, e.g. 2000",
                     ),
-                    "existujici_hypoteky": types.Schema(
+                    "existing_mortgages": types.Schema(
                         type=types.Type.NUMBER,
                         description=(
-                            "Zustatek uz splacenych hypotek osoby v eurech. "
-                            "Pokud uzivatel zadnou nema, pouzij 0."
+                            "Outstanding balance of the person's existing "
+                            "mortgages in euros. Use 0 if they have none."
                         ),
                     ),
                 },
-                required=["cisty_mesicni_prijem"],
+                required=["net_monthly_income"],
             ),
         ),
         types.FunctionDeclaration(
-            name="mesicni_splatka",
+            name="monthly_payment",
             description=(
-                "Spocita mesicni anuitni splatku uveru nebo hypoteky. "
-                "Pouzij vzdy, kdyz se uzivatel pta na vysi mesicni splatky. "
-                "Jako jistinu muzes pouzit vysledek nastroje max_hypoteka."
+                "Work out the monthly annuity payment on a loan or mortgage. "
+                "Use this whenever the user asks how much they would pay per "
+                "month. You may pass the result of max_mortgage as the "
+                "principal."
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
-                    "jistina": types.Schema(
+                    "principal": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Vyse uveru v eurech, napr. 192000",
+                        description="Loan amount in euros, e.g. 192000",
                     ),
-                    "urokova_sazba": types.Schema(
+                    "interest_rate": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Rocni urokova sazba v procentech, napr. 4.9",
+                        description="Annual interest rate in percent, e.g. 4.9",
                     ),
-                    "doba_v_letech": types.Schema(
+                    "years": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Doba splaceni v letech, napr. 30",
+                        description="Repayment term in years, e.g. 30",
                     ),
                 },
-                required=["jistina", "urokova_sazba", "doba_v_letech"],
+                required=["principal", "interest_rate", "years"],
             ),
         ),
         types.FunctionDeclaration(
-            name="celkove_naklady",
+            name="total_cost",
             description=(
-                "Spocita, kolik uzivatel za cely uver zaplati celkem a kolik "
-                "z toho jsou uroky. Vyzaduje jiz znamou mesicni splatku, "
-                "takze ji nejdriv ziskej nastrojem mesicni_splatka."
+                "Work out how much the user pays over the whole loan and how "
+                "much of that is interest. It needs a known monthly payment, "
+                "so get that from monthly_payment first."
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
-                    "mesicni_splatka": types.Schema(
+                    "monthly_payment": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Mesicni splatka v eurech",
+                        description="Monthly payment in euros",
                     ),
-                    "doba_v_letech": types.Schema(
+                    "years": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Doba splaceni v letech",
+                        description="Repayment term in years",
                     ),
-                    "jistina": types.Schema(
+                    "principal": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Puvodni vyse uveru v eurech",
+                        description="Original loan amount in euros",
                     ),
                 },
-                required=["mesicni_splatka", "doba_v_letech", "jistina"],
+                required=["monthly_payment", "years", "principal"],
             ),
         ),
     ]
 )
 
-SYSTEMOVA_INSTRUKCE = (
-    "Jsi hypotecni poradce. Cisla nikdy nepocitej sam, vzdy pouzij dostupne "
-    "nastroje. Pokud potrebujes vysledek jednoho nastroje jako vstup pro "
-    "druhy, zavolej je postupne. "
-    "Kdyz uzivatel uvede cisty prijem, vzdy dojdi az na konec vypoctu a "
-    "uved vsechny ctyri hodnoty: maximalni vysi hypoteky, mesicni splatku, "
-    "uroky celkem a dobu splaceni v letech. "
-    "Odpovidej cesky, kratce a s konkretnimi cisly v eurech (EUR). "
-    "Pokud nastroj vrati klic error, vysvetli uzivateli, co je spatne, "
-    "a nehadej vysledek."
+SYSTEM_INSTRUCTION = (
+    "You are a mortgage advisor. Never do the arithmetic yourself, always "
+    "use the tools available to you. If you need the result of one tool as "
+    "input for another, call them in sequence. "
+    "When the user states their net income, always follow the calculation "
+    "through to the end and report all four values: the maximum mortgage, "
+    "the monthly payment, the total interest and the repayment term in years. "
+    "Answer briefly, with concrete figures in euros (EUR). "
+    "If a tool returns an error key, explain to the user what is wrong and "
+    "do not guess the result."
 )
 
 
-def vykonej_nastroj(nazev: str, argumenty: dict) -> dict:
-    """Zavola nastroj podle nazvu. Neznamy nazev vrati chybu, nikoli vyjimku."""
-    funkce = DOSTUPNE_FUNKCE.get(nazev)
-    if funkce is None:
-        return {"error": f"Nastroj {nazev} neexistuje."}
+def execute_tool(name: str, arguments: dict) -> dict:
+    """Call a tool by name. An unknown name returns an error, not an exception."""
+    function = AVAILABLE_FUNCTIONS.get(name)
+    if function is None:
+        return {"error": f"Tool {name} does not exist."}
     try:
-        return funkce(**argumenty)
-    except TypeError as chyba:
-        return {"error": f"Spatne argumenty pro {nazev}: {chyba}"}
+        return function(**arguments)
+    except TypeError as problem:
+        return {"error": f"Bad arguments for {name}: {problem}"}
 
 
-def spust_agenta(dotaz: str) -> str:
+def run_agent(question: str) -> str:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        sys.exit("Chybi GEMINI_API_KEY. Zkopiruj .env.example do .env a vypln klic.")
+        sys.exit("GEMINI_API_KEY is missing. Copy .env.example to .env and fill it in.")
 
     client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
-        tools=[NASTROJE],
-        system_instruction=SYSTEMOVA_INSTRUKCE,
+        tools=[TOOLS],
+        system_instruction=SYSTEM_INSTRUCTION,
     )
 
-    obsah = [types.Content(role="user", parts=[types.Part.from_text(text=dotaz)])]
+    history = [types.Content(role="user", parts=[types.Part.from_text(text=question)])]
 
-    print(f"DOTAZ UZIVATELE:\n  {dotaz}\n")
+    print(f"USER QUESTION:\n  {question}\n")
 
-    for krok in range(1, MAX_KROKU + 1):
+    for step in range(1, MAX_STEPS + 1):
         try:
-            odpoved = client.models.generate_content(
-                model=MODEL, contents=obsah, config=config
+            response = client.models.generate_content(
+                model=MODEL, contents=history, config=config
             )
-        except errors.ClientError as chyba:
-            # Nejcasteji vycerpana kvota free tier (429) nebo neplatny klic (400).
-            if chyba.code == 429:
+        except errors.ClientError as problem:
+            # Usually an exhausted free-tier quota (429) or a bad key (400).
+            if problem.code == 429:
                 sys.exit(
-                    "Vycerpana kvota Gemini API (free tier ma denni limit "
-                    f"na model {MODEL}). Zkus to pozdeji nebo zmen MODEL."
+                    "Gemini API quota exhausted (the free tier has a daily "
+                    f"limit per model, here {MODEL}). Try later or change MODEL."
                 )
-            sys.exit(f"Gemini API odmitlo pozadavek ({chyba.code}): {chyba.message}")
-        except errors.ServerError as chyba:
+            sys.exit(f"Gemini API rejected the request ({problem.code}): {problem.message}")
+        except errors.ServerError as problem:
             sys.exit(
-                f"Gemini API je docasne nedostupne ({chyba.code}). "
-                "Jde o preteceni na strane Google, zkus to za chvili znovu."
+                f"Gemini API is temporarily unavailable ({problem.code}). "
+                "This is overload on Google's side, try again shortly."
             )
 
-        kandidat = odpoved.candidates[0]
+        candidate = response.candidates[0]
 
-        # Odpoved modelu se musi vratit do historie, jinak model v dalsim
-        # kroku nevi, ze uz nastroj zavolal.
-        obsah.append(kandidat.content)
+        # The model's own reply has to go back into the history, otherwise on
+        # the next step it does not know it already called a tool.
+        history.append(candidate.content)
 
-        volani = [
-            cast.function_call
-            for cast in (kandidat.content.parts or [])
-            if cast.function_call
+        calls = [
+            part.function_call
+            for part in (candidate.content.parts or [])
+            if part.function_call
         ]
 
-        if not volani:
-            print(f"[krok {krok}] model uz nechce zadny nastroj, koncim smycku\n")
-            return odpoved.text
+        if not calls:
+            print(f"[step {step}] model wants no more tools, leaving the loop\n")
+            return response.text
 
-        odpovedi_nastroju = []
-        for hovor in volani:
-            argumenty = dict(hovor.args or {})
-            vysledek = vykonej_nastroj(hovor.name, argumenty)
+        tool_results = []
+        for call in calls:
+            arguments = dict(call.args or {})
+            result = execute_tool(call.name, arguments)
 
-            print(f"[krok {krok}] VOLANI NASTROJE: {hovor.name}")
-            print(f"           argumenty: {argumenty}")
-            print(f"           vysledek:  {vysledek}\n")
+            print(f"[step {step}] TOOL CALL: {call.name}")
+            print(f"         arguments: {arguments}")
+            print(f"         result:    {result}\n")
 
-            odpovedi_nastroju.append(
-                types.Part.from_function_response(name=hovor.name, response=vysledek)
+            tool_results.append(
+                types.Part.from_function_response(name=call.name, response=result)
             )
 
-        # Vysledky nastroju posilame zpet modelu jako dalsi vstup.
-        obsah.append(types.Content(role="user", parts=odpovedi_nastroju))
+        # Send the tool results back to the model as the next input.
+        history.append(types.Content(role="user", parts=tool_results))
 
-    return "Dosazen limit kroku, model nedospel k finalni odpovedi."
+    return "Step limit reached, the model did not produce a final answer."
 
 
-def sestav_dotaz(args) -> str:
-    """Z prijmu poskladá dotaz, jinak vezme volny text z prikazove radky."""
-    if args.prijem is not None:
-        soucasne = (
-            f"Uz mam hypoteky se zustatkem {args.dluhy} EUR. "
-            if args.dluhy
-            else "Zadnou hypoteku zatim nemam. "
+def build_question(args) -> str:
+    """Build a question from the income, or take free text from the command line."""
+    if args.income is not None:
+        current = (
+            f"I already hold mortgages with a balance of {args.debts} EUR. "
+            if args.debts
+            else "I hold no mortgage yet. "
         )
         return (
-            f"Muj cisty mesicni prijem je {args.prijem} EUR. {soucasne}"
-            f"Na jak velkou hypoteku mam narok, jaka bude mesicni splatka "
-            f"a kolik celkem zaplatim na urocich, pri sazbe {args.sazba} % p.a. "
-            f"a dobe splaceni {args.roky} let?"
+            f"My net monthly income is {args.income} EUR. {current}"
+            f"How large a mortgage do I qualify for, what would the monthly "
+            f"payment be, and how much interest would I pay in total, at a "
+            f"rate of {args.rate}% p.a. over {args.years} years?"
         )
-    if args.dotaz:
-        return " ".join(args.dotaz)
+    if args.question:
+        return " ".join(args.question)
     return (
-        "Beru hypoteku 140 000 EUR na 25 let pri urokove sazbe 4,9 % p.a. "
-        "Jaka bude mesicni splatka a kolik celkem zaplatim na urocich?"
+        "I am taking a mortgage of 140 000 EUR over 25 years at an interest "
+        "rate of 4.9% p.a. What is the monthly payment and how much interest "
+        "will I pay in total?"
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Hypotecni poradce - LLM s volanim nastroju."
+        description="Mortgage advisor - an LLM with tool calling."
     )
     parser.add_argument(
-        "--prijem",
+        "--income",
         type=float,
         help=(
-            "Cisty mesicni prijem v EUR. Spocita maximalni hypoteku "
-            "(8x cisty rocni prijem), splatku i uroky."
+            "Net monthly income in EUR. Works out the maximum mortgage "
+            "(8x net yearly income), the payment and the interest."
         ),
     )
     parser.add_argument(
-        "--dluhy",
+        "--debts",
         type=float,
         default=0,
         help=(
-            "Zustatek uz splacenych hypotek v EUR. Odecte se od zakonneho "
-            "stropu, protoze ten plati na soucet vsech hypotek (vychozi 0)."
+            "Outstanding balance of existing mortgages in EUR. Subtracted "
+            "from the legal cap, which applies to all mortgages a person "
+            "holds together (default 0)."
         ),
     )
     parser.add_argument(
-        "--sazba",
+        "--rate",
         type=float,
-        default=VYCHOZI_SAZBA,
-        help=f"Rocni urokova sazba v procentech (vychozi {VYCHOZI_SAZBA})",
+        default=DEFAULT_RATE,
+        help=f"Annual interest rate in percent (default {DEFAULT_RATE})",
     )
     parser.add_argument(
-        "--roky",
+        "--years",
         type=float,
-        default=VYCHOZI_DOBA,
-        help=f"Doba splaceni v letech (vychozi {VYCHOZI_DOBA})",
+        default=DEFAULT_YEARS,
+        help=f"Repayment term in years (default {DEFAULT_YEARS})",
     )
     parser.add_argument(
-        "dotaz", nargs="*", help="Volny dotaz misto parametru --prijem"
+        "question", nargs="*", help="A free-text question instead of --income"
     )
     args = parser.parse_args()
 
-    vysledek = spust_agenta(sestav_dotaz(args))
-    print("FINALNI ODPOVED MODELU:")
-    print(vysledek)
+    answer = run_agent(build_question(args))
+    print("FINAL ANSWER FROM THE MODEL:")
+    print(answer)

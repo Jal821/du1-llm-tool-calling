@@ -1,7 +1,7 @@
 [project]
 name = "du1-llm-tool-calling"
 version = "0.1.0"
-description = "DU1 - Python skript, ktery vola LLM API, pouzije nastroj a vrati vysledek zpet modelu"
+description = "Homework 1 - a Python script that calls an LLM API, uses tools and feeds the results back to the model"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
