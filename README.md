@@ -10,52 +10,72 @@ Použité API: **Google Gemini** (`google-genai`), model `gemini-3.6-flash`.
 | Požadavek | Kde v kódu |
 | --- | --- |
 | Volání LLM API | `main.py`, `client.models.generate_content()` |
-| Použití nástroje (výpočetní funkce) | `nastroje.py`, dvě čistě výpočetní funkce |
+| Použití nástroje (výpočetní funkce) | `nastroje.py`, tři čistě výpočetní funkce |
 | Vrácení výsledku zpět LLM | `main.py`, `types.Part.from_function_response()` a smyčka |
 
-## Doména: hypoteční kalkulačka
+## Doména: hypoteční poradce
 
-Dva nástroje, přičemž **druhý pracuje s výstupem prvního**. To je jádro úkolu —
-nejde o jedno izolované volání, ale o skutečné zřetězení.
+Tři nástroje, přičemž **každý pracuje s výstupem předchozího**. To je jádro
+úkolu — nejde o jedno izolované volání, ale o skutečné zřetězení.
 
 | Nástroj | Vstupy | Výstup |
 | --- | --- | --- |
+| `max_hypoteka` | čistý měsíční příjem | maximální výše hypotéky (8× čistý roční příjem) |
 | `mesicni_splatka` | jistina, úroková sazba p.a., doba v letech | měsíční anuitní splátka |
 | `celkove_naklady` | měsíční splátka, doba v letech, jistina | celkem zaplaceno, úroky celkem |
 
 ## Jak to běží
 
 ```
-Dotaz uživatele
+--prijem 2000
       │
       ▼
-Gemini  ──▶ chce nástroj mesicni_splatka(140000, 4.9, 25)
+Gemini  ──▶ chce nástroj max_hypoteka(2000)
       │
       ▼
-Skript vykoná funkci ──▶ {"mesicni_splatka": 810.29, ...}
+Skript vykoná funkci ──▶ {"max_hypoteka": 192000, ...}
       │
       ▼
-Výsledek zpět do Gemini ──▶ chce nástroj celkove_naklady(810.29, 25, 140000)
+Výsledek zpět do Gemini ──▶ chce nástroj mesicni_splatka(192000, 4.9, 30)
       │
       ▼
-Skript vykoná funkci ──▶ {"uroky_celkem": 103087.0, ...}
+Skript vykoná funkci ──▶ {"mesicni_splatka": 1019.0, ...}
+      │
+      ▼
+Výsledek zpět do Gemini ──▶ chce nástroj celkove_naklady(1019.0, 30, 192000)
+      │
+      ▼
+Skript vykoná funkci ──▶ {"uroky_celkem": 174840.0, ...}
       │
       ▼
 Výsledek zpět do Gemini ──▶ už nechce nástroj, píše finální odpověď
 ```
 
-Smyčka běží, dokud model chce volat nástroje, s pojistkou `MAX_KROKU = 6`
-proti nekonečnému cyklu.
+Smyčka běží, dokud model chce volat nástroje, s pojistkou `MAX_KROKU = 8`
+proti nekonečnému cyklu. Model si pořadí volání vybírá sám, skript ho nikde
+nepředepisuje.
 
 ## Spuštění
 
 ```bash
 uv sync
 cp .env.example .env      # a vyplň GEMINI_API_KEY
-uv run main.py
 ```
 
-Vlastní dotaz:
+**Z čistého měsíčního příjmu** (spočítá maximální hypotéku, splátku i úroky):
+
+```bash
+uv run main.py --prijem 2000
+uv run main.py --prijem 2500 --sazba 5.2 --roky 25
+```
+
+| Parametr | Význam | Výchozí |
+| --- | --- | --- |
+| `--prijem` | čistý měsíční příjem v EUR | — |
+| `--sazba` | roční úroková sazba v % | 4.9 |
+| `--roky` | doba splácení v letech | 30 |
+
+**Volný dotaz** místo parametrů:
 
 ```bash
 uv run main.py "Kolik zaplatim na urocich u uveru 50 000 EUR na 10 let pri 6 %?"
@@ -67,24 +87,34 @@ v `.gitignore` a do repozitáře se nikdy nedostane.
 ## Ukázkový výstup
 
 ```
+$ uv run main.py --prijem 2000
+
 DOTAZ UZIVATELE:
-  Beru hypoteku 140 000 EUR na 25 let pri urokove sazbe 4,9 % p.a. Jaka bude
-  mesicni splatka a kolik celkem zaplatim na urocich?
+  Muj cisty mesicni prijem je 2000.0 EUR. Na jak velkou hypoteku mam narok,
+  jaka bude mesicni splatka a kolik celkem zaplatim na urocich, pri sazbe
+  4.9 % p.a. a dobe splaceni 30 let?
 
-[krok 1] VOLANI NASTROJE: mesicni_splatka
-           argumenty: {'jistina': 140000, 'urokova_sazba': 4.9, 'doba_v_letech': 25}
-           vysledek:  {'mesicni_splatka': 810.29, 'pocet_splatek': 300, ...}
+[krok 1] VOLANI NASTROJE: max_hypoteka
+           argumenty: {'cisty_mesicni_prijem': 2000}
+           vysledek:  {'cisty_rocni_prijem': 24000, 'max_hypoteka': 192000, ...}
 
-[krok 2] VOLANI NASTROJE: celkove_naklady
-           argumenty: {'mesicni_splatka': 810.29, 'doba_v_letech': 25, 'jistina': 140000}
-           vysledek:  {'zaplaceno_celkem': 243087.0, 'uroky_celkem': 103087.0, ...}
+[krok 2] VOLANI NASTROJE: mesicni_splatka
+           argumenty: {'jistina': 192000, 'urokova_sazba': 4.9, 'doba_v_letech': 30}
+           vysledek:  {'mesicni_splatka': 1019.0, 'pocet_splatek': 360, ...}
 
-[krok 3] model uz nechce zadny nastroj, koncim smycku
+[krok 3] VOLANI NASTROJE: celkove_naklady
+           argumenty: {'mesicni_splatka': 1019, 'doba_v_letech': 30, 'jistina': 192000}
+           vysledek:  {'zaplaceno_celkem': 366840, 'uroky_celkem': 174840, ...}
+
+[krok 4] model uz nechce zadny nastroj, koncim smycku
 
 FINALNI ODPOVED MODELU:
-Vaše měsíční splátka bude 810,29 EUR.
-Za celou dobu 25 let zaplatíte na úrocích celkem 103 087 EUR
-(celkově zaplatíte 243 087 EUR).
+Na základě vašeho čistého měsíčního příjmu 2 000 EUR jsou výsledky následující:
+
+* Maximální výše hypotéky: 192 000 EUR
+* Měsíční splátka: 1 019 EUR
+* Úroky celkem: 174 840 EUR
+* Doba splácení: 30 let
 ```
 
 ## Ošetření chyb
@@ -94,14 +124,15 @@ s klíčem `error`, takže chybu dostane **model** jako výsledek nástroje a m�
 ni reagovat slovy místo pádu skriptu:
 
 ```
-$ uv run main.py "Jaka bude splatka u hypoteky 3 000 000 EUR na 0 let pri 5 %?"
+$ uv run main.py --prijem 0
 
-[krok 1] VOLANI NASTROJE: mesicni_splatka
-           argumenty: {'jistina': 3000000, 'urokova_sazba': 5, 'doba_v_letech': 0}
-           vysledek:  {'error': 'Doba splaceni musi byt vetsi nez nula.'}
+[krok 1] VOLANI NASTROJE: max_hypoteka
+           argumenty: {'cisty_mesicni_prijem': 0}
+           vysledek:  {'error': 'Cisty mesicni prijem musi byt vetsi nez nula.'}
 
 FINALNI ODPOVED MODELU:
-Měsíční splátku nelze spočítat, protože doba splácení musí být větší než 0 let.
+Při čistém měsíčním příjmu 0 EUR nelze hypotéku poskytnout.
+Čistý měsíční příjem musí být větší než nula.
 ```
 
 Stejně tak je ošetřen neznámý název nástroje a špatné argumenty.
@@ -117,19 +148,24 @@ případnou chybu. Místo toho se úvěr odsimuluje měsíc po měsíci a kontro
 že po poslední splátce je zůstatek nula:
 
 ```
-OK splatka 810.29 EUR, zustatek 0.0327 EUR
+OK max hypoteka 192000 EUR pri prijmu 2000 EUR
+OK splatka 810.29 EUR, zustatek 0.0327 EUR (limit 2.9435)
 OK nulovy urok
 OK uroky 116778.4 EUR
+OK retez: 192000 EUR -> 1019.0 EUR/mes -> 174840.0 EUR uroku za 30 let
 OK neplatne vstupy vraci error
 ```
 
-Zbytkových 3 centy je zaokrouhlení splátky na dvě desetinná místa, což odpovídá
-tomu, jak se úvěr splácí v praxi.
+Tolerance není pevné číslo. Splátka se zaokrouhluje na centy, ta půlcentová
+odchylka se ale každý měsíc úročí, takže na konci je vynásobená anuitním
+faktorem — u 30 let přibližně 817×, tedy jednotky eur. Funkce
+`povolena_odchylka()` proto limit počítá z délky a sazby úvěru. Pevná tolerance
+by u dlouhých úvěrů hlásila chybu tam, kde žádná není.
 
 ## Struktura
 
 ```
-main.py             volání API, deklarace nástrojů, smyčka agenta
+main.py             volání API, deklarace nástrojů, smyčka agenta, CLI
 nastroje.py         výpočetní funkce, bez závislosti na API
 test_nastroje.py    nezávislá kontrola výpočtu, bez volání API
 .env.example        šablona pro API klíč
@@ -137,3 +173,9 @@ test_nastroje.py    nezávislá kontrola výpočtu, bez volání API
 
 Výpočet je záměrně oddělen od API vrstvy — `nastroje.py` je testovatelný
 bez sítě a bez klíče.
+
+## Poznámka k pravidlu 8× roční příjem
+
+Násobek je v `nastroje.py` konstanta `NASOBEK_ROCNIHO_PRIJMU = 8`, takže se dá
+změnit na jednom místě. Jde o zjednodušené pravidlo pro účely úkolu — reálná
+banka posuzuje i DTI, DSTI, LTV a výdaje domácnosti.

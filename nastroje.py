@@ -5,6 +5,25 @@ takze chybu dostane model jako vysledek nastroje a muze na ni reagovat.
 Zadna funkce nevyhazuje vyjimku do smycky agenta.
 """
 
+# Kolikanasobek cisteho ROCNIHO prijmu banka pujci.
+NASOBEK_ROCNIHO_PRIJMU = 8
+
+
+def max_hypoteka(cisty_mesicni_prijem: float) -> dict:
+    """Spocita maximalni vysi hypoteky z cisteho mesicniho prijmu."""
+    if cisty_mesicni_prijem <= 0:
+        return {"error": "Cisty mesicni prijem musi byt vetsi nez nula."}
+
+    cisty_rocni_prijem = cisty_mesicni_prijem * 12
+    maximum = cisty_rocni_prijem * NASOBEK_ROCNIHO_PRIJMU
+
+    return {
+        "cisty_mesicni_prijem": round(cisty_mesicni_prijem, 2),
+        "cisty_rocni_prijem": round(cisty_rocni_prijem, 2),
+        "max_hypoteka": round(maximum, 2),
+        "pouzity_nasobek": NASOBEK_ROCNIHO_PRIJMU,
+    }
+
 
 def mesicni_splatka(jistina: float, urokova_sazba: float, doba_v_letech: float) -> dict:
     """Spocita mesicni anuitni splatku uveru."""
@@ -27,6 +46,7 @@ def mesicni_splatka(jistina: float, urokova_sazba: float, doba_v_letech: float) 
     return {
         "mesicni_splatka": round(splatka, 2),
         "pocet_splatek": pocet_splatek,
+        "doba_v_letech": doba_v_letech,
         "jistina": jistina,
         "urokova_sazba": urokova_sazba,
     }
@@ -49,6 +69,7 @@ def celkove_naklady(mesicni_splatka: float, doba_v_letech: float, jistina: float
         "zaplaceno_celkem": round(zaplaceno_celkem, 2),
         "uroky_celkem": round(uroky, 2),
         "uroky_v_procentech_jistiny": round(uroky / jistina * 100, 1),
+        "doba_v_letech": doba_v_letech,
         "pocet_splatek": pocet_splatek,
     }
 
@@ -56,6 +77,7 @@ def celkove_naklady(mesicni_splatka: float, doba_v_letech: float, jistina: float
 # Mapa nazvu nastroje na skutecnou funkci. Smycka agenta hleda jen zde,
 # takze model nemuze zavolat nic jineho.
 DOSTUPNE_FUNKCE = {
+    "max_hypoteka": max_hypoteka,
     "mesicni_splatka": mesicni_splatka,
     "celkove_naklady": celkove_naklady,
 }

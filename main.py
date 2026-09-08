@@ -2,10 +2,14 @@
 
 Skript zavola Gemini API, model si sam vybere nastroj, skript nastroj
 vykona a vysledek posle zpet modelu. Smycka bezi tak dlouho, dokud model
-chce volat dalsi nastroje. Druhy nastroj pracuje s vystupem prvniho,
-takze jde o skutecne zretezeni, ne o jedno volani.
+chce volat dalsi nastroje.
+
+Nastroje se retezi: z cisteho prijmu se spocita maximalni hypoteka,
+z ni mesicni splatka a z te celkove uroky. Kazdy krok pracuje s vystupem
+predchoziho, takze nejde o jedno izolovane volani.
 """
 
+import argparse
 import os
 import sys
 
@@ -23,29 +27,47 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 MODEL = "gemini-3.6-flash"
-MAX_KROKU = 6  # pojistka proti nekonecne smycce
+MAX_KROKU = 8  # pojistka proti nekonecne smycce
 
-DOTAZ = (
-    "Beru hypoteku 140 000 EUR na 25 let pri urokove sazbe 4,9 % p.a. "
-    "Jaka bude mesicni splatka a kolik celkem zaplatim na urocich?"
-)
+VYCHOZI_SAZBA = 4.9
+VYCHOZI_DOBA = 30
 
 # Deklarace nastroju pro model. Popisy jsou to jedine, podle ceho se model
 # rozhoduje, ktery nastroj zavolat, takze musi byt konkretni.
 NASTROJE = types.Tool(
     function_declarations=[
         types.FunctionDeclaration(
+            name="max_hypoteka",
+            description=(
+                "Spocita maximalni vysi hypoteky, kterou uzivatel dostane, "
+                "z jeho cisteho mesicniho prijmu. Pouzij vzdy, kdyz uzivatel "
+                "uvede svuj cisty prijem a chce vedet, na kolik ma narok. "
+                "Pokud uzivatel uvede rocni prijem, vydel ho dvanacti."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "cisty_mesicni_prijem": types.Schema(
+                        type=types.Type.NUMBER,
+                        description="Cisty mesicni prijem v eurech, napr. 2000",
+                    ),
+                },
+                required=["cisty_mesicni_prijem"],
+            ),
+        ),
+        types.FunctionDeclaration(
             name="mesicni_splatka",
             description=(
                 "Spocita mesicni anuitni splatku uveru nebo hypoteky. "
-                "Pouzij vzdy, kdyz se uzivatel pta na vysi mesicni splatky."
+                "Pouzij vzdy, kdyz se uzivatel pta na vysi mesicni splatky. "
+                "Jako jistinu muzes pouzit vysledek nastroje max_hypoteka."
             ),
             parameters=types.Schema(
                 type=types.Type.OBJECT,
                 properties={
                     "jistina": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Vyse uveru v eurech, napr. 140000",
+                        description="Vyse uveru v eurech, napr. 192000",
                     ),
                     "urokova_sazba": types.Schema(
                         type=types.Type.NUMBER,
@@ -53,7 +75,7 @@ NASTROJE = types.Tool(
                     ),
                     "doba_v_letech": types.Schema(
                         type=types.Type.NUMBER,
-                        description="Doba splaceni v letech, napr. 25",
+                        description="Doba splaceni v letech, napr. 30",
                     ),
                 },
                 required=["jistina", "urokova_sazba", "doba_v_letech"],
@@ -89,10 +111,14 @@ NASTROJE = types.Tool(
 )
 
 SYSTEMOVA_INSTRUKCE = (
-    "Jsi financni asistent. Cisla nikdy nepocitej sam, vzdy pouzij dostupne "
+    "Jsi hypotecni poradce. Cisla nikdy nepocitej sam, vzdy pouzij dostupne "
     "nastroje. Pokud potrebujes vysledek jednoho nastroje jako vstup pro "
-    "druhy, zavolej je postupne. Odpovidej cesky, kratce a s konkretnimi cisly v eurech (EUR). "
-    "Pokud nastroj vrati klic 'error', vysvetli uzivateli, co je spatne, "
+    "druhy, zavolej je postupne. "
+    "Kdyz uzivatel uvede cisty prijem, vzdy dojdi az na konec vypoctu a "
+    "uved vsechny ctyri hodnoty: maximalni vysi hypoteky, mesicni splatku, "
+    "uroky celkem a dobu splaceni v letech. "
+    "Odpovidej cesky, kratce a s konkretnimi cisly v eurech (EUR). "
+    "Pokud nastroj vrati klic error, vysvetli uzivateli, co je spatne, "
     "a nehadej vysledek."
 )
 
@@ -101,11 +127,11 @@ def vykonej_nastroj(nazev: str, argumenty: dict) -> dict:
     """Zavola nastroj podle nazvu. Neznamy nazev vrati chybu, nikoli vyjimku."""
     funkce = DOSTUPNE_FUNKCE.get(nazev)
     if funkce is None:
-        return {"error": f"Nastroj '{nazev}' neexistuje."}
+        return {"error": f"Nastroj {nazev} neexistuje."}
     try:
         return funkce(**argumenty)
     except TypeError as chyba:
-        return {"error": f"Spatne argumenty pro '{nazev}': {chyba}"}
+        return {"error": f"Spatne argumenty pro {nazev}: {chyba}"}
 
 
 def spust_agenta(dotaz: str) -> str:
@@ -162,9 +188,52 @@ def spust_agenta(dotaz: str) -> str:
     return "Dosazen limit kroku, model nedospel k finalni odpovedi."
 
 
+def sestav_dotaz(args) -> str:
+    """Z prijmu poskladá dotaz, jinak vezme volny text z prikazove radky."""
+    if args.prijem is not None:
+        return (
+            f"Muj cisty mesicni prijem je {args.prijem} EUR. "
+            f"Na jak velkou hypoteku mam narok, jaka bude mesicni splatka "
+            f"a kolik celkem zaplatim na urocich, pri sazbe {args.sazba} % p.a. "
+            f"a dobe splaceni {args.roky} let?"
+        )
+    if args.dotaz:
+        return " ".join(args.dotaz)
+    return (
+        "Beru hypoteku 140 000 EUR na 25 let pri urokove sazbe 4,9 % p.a. "
+        "Jaka bude mesicni splatka a kolik celkem zaplatim na urocich?"
+    )
+
+
 if __name__ == "__main__":
-    # Dotaz lze predat i z prikazove radky: uv run main.py "muj dotaz"
-    dotaz = " ".join(sys.argv[1:]) or DOTAZ
-    vysledek = spust_agenta(dotaz)
+    parser = argparse.ArgumentParser(
+        description="Hypotecni poradce - LLM s volanim nastroju."
+    )
+    parser.add_argument(
+        "--prijem",
+        type=float,
+        help=(
+            "Cisty mesicni prijem v EUR. Spocita maximalni hypoteku "
+            "(8x cisty rocni prijem), splatku i uroky."
+        ),
+    )
+    parser.add_argument(
+        "--sazba",
+        type=float,
+        default=VYCHOZI_SAZBA,
+        help=f"Rocni urokova sazba v procentech (vychozi {VYCHOZI_SAZBA})",
+    )
+    parser.add_argument(
+        "--roky",
+        type=float,
+        default=VYCHOZI_DOBA,
+        help=f"Doba splaceni v letech (vychozi {VYCHOZI_DOBA})",
+    )
+    parser.add_argument(
+        "dotaz", nargs="*", help="Volny dotaz misto parametru --prijem"
+    )
+    args = parser.parse_args()
+
+    vysledek = spust_agenta(sestav_dotaz(args))
     print("FINALNI ODPOVED MODELU:")
     print(vysledek)
