@@ -72,48 +72,77 @@ uv sync
 cp .env.example .env      # then fill in GEMINI_API_KEY
 ```
 
-**Interactive** — run it with no arguments and it asks you for the question:
+**Interactive** — run it with no arguments and it interviews you, one question
+at a time:
 
 ```
 $ uv run main.py
 
 BACKEND: gemini, model gemini-3.7-flash
 
-Ask a mortgage question in your own words. Examples:
-  - My net monthly income is 2000 EUR, how big a mortgage can I get?
-  - I earn 2500 net and already owe 40000. What can I still borrow over 25 years?
-  - How much interest would I pay on a 50000 EUR loan over 10 years at 6%?
+I am a mortgage calculator.
+I will ask you a few questions, one at a time.
 
-Your question (blank to quit): I earn 2200 net and already owe 30000. What can I still borrow?
+What is your monthly income? This is your NET income, in EUR: 2500
 
-[step 1] TOOL CALL: max_mortgage
-         arguments: {'net_monthly_income': 2200, 'existing_mortgages': 30000}
-         result:    {'legal_cap_total': 211200, 'max_mortgage': 181200, ...}
+Do you already have any mortgages? (yes/no): yes
 
-[step 2] TOOL CALL: monthly_payment
-         arguments: {'principal': 181200, 'interest_rate': 4.9, 'years': 30}
-         result:    {'monthly_payment': 961.68, ...}
+Mortgage number 1:
+  How much is still outstanding, in EUR: 40000
+  How many years does it still run: 12
+  At what interest rate, in % per year: 3,5
 
-[step 3] TOOL CALL: total_cost
-         result:    {'total_paid': 346204.8, 'total_interest': 165004.8, ...}
+Do you have another mortgage? (yes/no): yes
 
-[step 4] model wants no more tools, leaving the loop
+Mortgage number 2:
+  How much is still outstanding, in EUR: 15000
+  How many years does it still run: 5
+  At what interest rate, in % per year: 6
 
-FINAL ANSWER FROM THE MODEL:
-- Maximum mortgage: €181,200
-- Monthly payment: €961.68
-- Total interest over 30 years: €165,004.80
-- Repayment term: 30 years (assumed)
+Do you have another mortgage? (yes/no): no
 
-Assumptions used: annual interest rate of 4.9% and a 30-year term.
-
-Your question (blank to quit):
+Now the mortgage you are asking about:
+  What interest rate do you expect, in % per year [4.9]: 5.2
+  Over how many years do you want to repay it [30]: 25
 ```
 
-The model works the numbers out of plain language itself; nothing has to be
-typed in a fixed format. Ask as many questions as you like — a blank line,
-`exit` or Ctrl+C ends the session. If the API fails on one question, the
-session says so and returns to the prompt rather than dying.
+The answers are turned into one plain-language question, which is printed so
+you can see exactly what the model was asked:
+
+```
+PUTTING THIS TO THE MODEL:
+  My net monthly income is 2500 EUR. I already hold 2 mortgages: 40000 EUR
+  outstanding over 12 more years at 3.5% p.a.; 15000 EUR outstanding over 5
+  more years at 6% p.a. How large a mortgage do I qualify for, ...
+```
+
+The model then picks the tools. With existing mortgages it also prices each of
+them, so the answer includes the total monthly burden:
+
+```
+Maximum mortgage you qualify for   185,000 EUR   (cap 240,000 less the 55,000 held)
+Monthly payment                    1,103.16 EUR
+Total interest paid                145,948.00 EUR
+Repayment term                     25 years
+
+Existing: 40,000 @ 3.5% over 12y -> 340.58 EUR
+          15,000 @ 6.0% over 5y  -> 289.99 EUR
+Total monthly across all mortgages 1,733.73 EUR
+```
+
+Details of the interview:
+
+- Every amount is asked for separately, and a non-numeric answer is rejected
+  and asked again rather than crashing.
+- A comma works as a decimal separator, so `3,5` is accepted as well as `3.5`.
+- The last two questions have defaults in square brackets; a blank line takes
+  them.
+- Existing mortgages are asked for one at a time and can be listed as many as
+  you hold. Their balances are summed, because the legal cap applies to all of
+  them together.
+- After an answer it offers another calculation. Ctrl+C ends the session.
+- If the API fails on one question, the session says so and carries on rather
+  than dying.
 
 **Non-interactive** — give the question up front and it answers once and exits,
 which is what you want from a script or a CI job:

@@ -274,46 +274,130 @@ def run_agent_openai(question: str) -> str:
     return "Step limit reached, the model did not produce a final answer."
 
 
-EXIT_WORDS = {"exit", "quit", "q", "konec", "koniec"}
+YES_WORDS = {"y", "yes", "ano", "a"}
+NO_WORDS = {"n", "no", "ne", "nie"}
 
-EXAMPLES = [
-    "My net monthly income is 2000 EUR, how big a mortgage can I get?",
-    "I earn 2500 net and already owe 40000. What can I still borrow over 25 years?",
-    "How much interest would I pay on a 50000 EUR loan over 10 years at 6%?",
-]
+
+class UserQuit(Exception):
+    """The user pressed Ctrl+C or stdin ran out during the interview."""
+
+
+def ask_line(prompt: str) -> str:
+    """Ask one question and return the raw answer."""
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise UserQuit from None
+
+
+def ask_number(prompt: str, default: float | None = None) -> float:
+    """Ask for a number and keep asking until the answer is one.
+
+    A blank answer takes the default where there is one. Commas are accepted
+    as decimal separators, since that is how the amount is written locally.
+    """
+    suffix = f" [{default}]" if default is not None else ""
+    while True:
+        answer = ask_line(f"{prompt}{suffix}: ")
+
+        if not answer and default is not None:
+            return default
+        if not answer:
+            print("  Please enter a number.")
+            continue
+
+        try:
+            return float(answer.replace(",", ".").replace(" ", ""))
+        except ValueError:
+            print(f"  '{answer}' is not a number. Try again, digits only.")
+
+
+def ask_yes_no(prompt: str) -> bool:
+    """Ask a yes or no question and keep asking until the answer is one."""
+    while True:
+        answer = ask_line(f"{prompt} (yes/no): ").lower()
+        if answer in YES_WORDS:
+            return True
+        if answer in NO_WORDS:
+            return False
+        print("  Please answer yes or no.")
+
+
+def tidy(number: float) -> str:
+    """Drop the pointless .0 so the composed question reads like a person wrote it."""
+    return str(int(number)) if number == int(number) else str(number)
+
+
+def run_interview() -> str:
+    """Ask the questions one by one, then compose the question for the model."""
+    income = ask_number("What is your monthly income? This is your NET income, in EUR")
+
+    existing = []
+    if ask_yes_no("\nDo you already have any mortgages?"):
+        while True:
+            index = len(existing) + 1
+            print(f"\nMortgage number {index}:")
+            existing.append(
+                {
+                    "balance": ask_number("  How much is still outstanding, in EUR"),
+                    "years": ask_number("  How many years does it still run"),
+                    "rate": ask_number("  At what interest rate, in % per year"),
+                }
+            )
+            if not ask_yes_no("\nDo you have another mortgage?"):
+                break
+
+    print("\nNow the mortgage you are asking about:")
+    rate = ask_number("  What interest rate do you expect, in % per year", DEFAULT_RATE)
+    years = ask_number("  Over how many years do you want to repay it", DEFAULT_YEARS)
+
+    # Compose one plain-language question. The model then decides which tools
+    # to call and in what order; nothing here prescribes the calculation.
+    if existing:
+        parts = [
+            f"{tidy(item['balance'])} EUR outstanding over "
+            f"{tidy(item['years'])} more years at {tidy(item['rate'])}% p.a."
+            for item in existing
+        ]
+        # The parts already end in "p.a.", so no extra full stop here.
+        held = (
+            f"I already hold {len(existing)} mortgage"
+            f"{'s' if len(existing) > 1 else ''}: " + "; ".join(parts) + " "
+        )
+        also = (
+            " Also tell me the monthly payment on the mortgages I already hold "
+            "and what my total monthly payment across all of them would be."
+        )
+    else:
+        held = "I hold no mortgage yet. "
+        also = ""
+
+    return (
+        f"My net monthly income is {tidy(income)} EUR. {held}"
+        f"How large a mortgage do I qualify for, what would the monthly payment "
+        f"be, and how much interest would I pay in total, at a rate of "
+        f"{tidy(rate)}% p.a. over {tidy(years)} years?{also}"
+    )
 
 
 def question_from_flags(args) -> str | None:
     """Build a question from the flags, or None if the user gave none."""
     if args.income is not None:
         current = (
-            f"I already hold mortgages with a balance of {args.debts} EUR. "
+            f"I already hold mortgages with a balance of {tidy(args.debts)} EUR. "
             if args.debts
             else "I hold no mortgage yet. "
         )
         return (
-            f"My net monthly income is {args.income} EUR. {current}"
+            f"My net monthly income is {tidy(args.income)} EUR. {current}"
             f"How large a mortgage do I qualify for, what would the monthly "
             f"payment be, and how much interest would I pay in total, at a "
-            f"rate of {args.rate}% p.a. over {args.years} years?"
+            f"rate of {tidy(args.rate)}% p.a. over {tidy(args.years)} years?"
         )
     if args.question:
         return " ".join(args.question)
     return None
-
-
-def ask_user() -> str | None:
-    """Read one question from the keyboard. None means the user is done."""
-    try:
-        question = input("Your question (blank to quit): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        # Ctrl+C, Ctrl+Z, or stdin piped in and exhausted.
-        print()
-        return None
-
-    if not question or question.lower() in EXIT_WORDS:
-        return None
-    return question
 
 
 if __name__ == "__main__":
@@ -391,26 +475,34 @@ if __name__ == "__main__":
         print(answer)
         raise SystemExit(0)
 
-    # Interactive: the user types their own questions.
-    print("Ask a mortgage question in your own words. Examples:")
-    for example in EXAMPLES:
-        print(f"  - {example}")
-    print()
+    # Interactive: walk the user through the questions one at a time.
+    print("I am a mortgage calculator.")
+    print("I will ask you a few questions, one at a time.\n")
 
     while True:
-        question = ask_user()
-        if question is None:
+        try:
+            question = run_interview()
+        except UserQuit:
             print("Bye.")
             break
 
-        print()
+        print(f"\nPUTTING THIS TO THE MODEL:\n  {question}\n")
+
         try:
             answer = run_agent(question)
         except BackendError as problem:
             # One bad request should not end the session.
-            print(f"Could not answer that one: {problem}\n")
-            continue
+            print(f"Could not answer that one: {problem}")
+        else:
+            print("FINAL ANSWER FROM THE MODEL:")
+            print(answer)
 
-        print("FINAL ANSWER FROM THE MODEL:")
-        print(answer)
+        print()
+        try:
+            if not ask_yes_no("Another calculation?"):
+                print("Bye.")
+                break
+        except UserQuit:
+            print("Bye.")
+            break
         print()
