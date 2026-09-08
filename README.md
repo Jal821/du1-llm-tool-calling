@@ -4,7 +4,7 @@ A Python script that calls an LLM API, lets the model pick a tool, executes that
 tool and **sends the result back to the model**, which turns it into the final
 answer.
 
-API used: **Google Gemini** (`google-genai`), model `gemini-3.6-flash`.
+API used: **Google Gemini** (`google-genai`), model `gemini-3.7-flash`.
 
 ## The assignment and how it is met
 
@@ -108,7 +108,7 @@ script says so in one sentence instead of a traceback:
 
 ```
 Gemini API quota exhausted (the free tier has a daily limit per model,
-here gemini-3.6-flash). Try later or change MODEL.
+here gemini-3.7-flash). Try later or change MODEL.
 ```
 
 The model can be switched without touching the code:

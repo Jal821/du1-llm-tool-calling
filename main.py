@@ -29,7 +29,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # The model can be overridden through .env or an environment variable, in
 # case the free tier runs out of daily quota on this particular model.
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.7-flash")
 MAX_STEPS = 8  # guard against an endless loop
 
 DEFAULT_RATE = 4.9
