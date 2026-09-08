@@ -56,10 +56,22 @@ SYSTEM_INSTRUCTION = (
     "When the user states their net income, always follow the calculation "
     "through to the end and report all four values: the maximum mortgage, "
     "the monthly payment, the total interest and the repayment term in years. "
+    f"If the user does not give an interest rate, assume {DEFAULT_RATE}% p.a. "
+    f"If they do not give a term, assume {DEFAULT_YEARS} years. Say which "
+    "assumption you used. Never ask the user whether you should continue the "
+    "calculation: finish it in the same answer using those assumptions. "
     "Answer briefly, with concrete figures in euros (EUR). "
     "If a tool returns an error key, explain to the user what is wrong and "
     "do not guess the result."
 )
+
+
+class BackendError(RuntimeError):
+    """The API refused or failed a request.
+
+    Raised rather than exiting, so that in interactive mode a transient
+    failure such as a 503 ends one question instead of the whole session.
+    """
 
 
 def report_call(step: int, name: str, arguments: dict, result: dict) -> None:
@@ -122,19 +134,19 @@ def run_agent_gemini(question: str) -> str:
         except errors.ClientError as problem:
             # Usually an exhausted free-tier quota (429) or a bad key (400).
             if problem.code == 429:
-                sys.exit(
+                raise BackendError(
                     "Gemini API quota exhausted (the free tier has a daily "
                     f"limit per model, here {GEMINI_MODEL}). Try later or "
                     "change GEMINI_MODEL."
-                )
-            sys.exit(
+                ) from problem
+            raise BackendError(
                 f"Gemini API rejected the request ({problem.code}): {problem.message}"
-            )
+            ) from problem
         except errors.ServerError as problem:
-            sys.exit(
+            raise BackendError(
                 f"Gemini API is temporarily unavailable ({problem.code}). "
                 "This is overload on Google's side, try again shortly."
-            )
+            ) from problem
 
         candidate = response.candidates[0]
 
@@ -205,10 +217,10 @@ def run_agent_openai(question: str) -> str:
                 model=OPENAI_MODEL, messages=messages, tools=declarations
             )
         except APIError as problem:
-            sys.exit(
+            raise BackendError(
                 f"The endpoint at {OPENAI_BASE_URL} rejected the request: "
                 f"{getattr(problem, 'message', problem)}"
-            )
+            ) from problem
 
         reply = response.choices[0].message
 
@@ -262,8 +274,17 @@ def run_agent_openai(question: str) -> str:
     return "Step limit reached, the model did not produce a final answer."
 
 
-def build_question(args) -> str:
-    """Build a question from the income, or take free text from the command line."""
+EXIT_WORDS = {"exit", "quit", "q", "konec", "koniec"}
+
+EXAMPLES = [
+    "My net monthly income is 2000 EUR, how big a mortgage can I get?",
+    "I earn 2500 net and already owe 40000. What can I still borrow over 25 years?",
+    "How much interest would I pay on a 50000 EUR loan over 10 years at 6%?",
+]
+
+
+def question_from_flags(args) -> str | None:
+    """Build a question from the flags, or None if the user gave none."""
     if args.income is not None:
         current = (
             f"I already hold mortgages with a balance of {args.debts} EUR. "
@@ -278,11 +299,21 @@ def build_question(args) -> str:
         )
     if args.question:
         return " ".join(args.question)
-    return (
-        "I am taking a mortgage of 140 000 EUR over 25 years at an interest "
-        "rate of 4.9% p.a. What is the monthly payment and how much interest "
-        "will I pay in total?"
-    )
+    return None
+
+
+def ask_user() -> str | None:
+    """Read one question from the keyboard. None means the user is done."""
+    try:
+        question = input("Your question (blank to quit): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        # Ctrl+C, Ctrl+Z, or stdin piped in and exhausted.
+        print()
+        return None
+
+    if not question or question.lower() in EXIT_WORDS:
+        return None
+    return question
 
 
 if __name__ == "__main__":
@@ -329,7 +360,9 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "question", nargs="*", help="A free-text question instead of --income"
+        "question",
+        nargs="*",
+        help="A free-text question. Omit it and the script will ask you.",
     )
     args = parser.parse_args()
 
@@ -341,9 +374,43 @@ if __name__ == "__main__":
     where = f" at {OPENAI_BASE_URL}" if backend == "openai" else ""
     print(f"BACKEND: {backend}, model {model}{where}\n")
 
-    question = build_question(args)
-    print(f"USER QUESTION:\n  {question}\n")
+    run_agent = run_agent_gemini if backend == "gemini" else run_agent_openai
 
-    answer = run_agent_gemini(question) if backend == "gemini" else run_agent_openai(question)
-    print("FINAL ANSWER FROM THE MODEL:")
-    print(answer)
+    supplied = question_from_flags(args)
+    if supplied:
+        # Non-interactive: one question from the flags, then exit. Keeps the
+        # script usable from a script or a CI job.
+        print(f"USER QUESTION:\n  {supplied}\n")
+        # Assign before printing the header: run_agent prints the tool trace
+        # as it goes, and that has to appear above the final answer.
+        try:
+            answer = run_agent(supplied)
+        except BackendError as problem:
+            sys.exit(str(problem))
+        print("FINAL ANSWER FROM THE MODEL:")
+        print(answer)
+        raise SystemExit(0)
+
+    # Interactive: the user types their own questions.
+    print("Ask a mortgage question in your own words. Examples:")
+    for example in EXAMPLES:
+        print(f"  - {example}")
+    print()
+
+    while True:
+        question = ask_user()
+        if question is None:
+            print("Bye.")
+            break
+
+        print()
+        try:
+            answer = run_agent(question)
+        except BackendError as problem:
+            # One bad request should not end the session.
+            print(f"Could not answer that one: {problem}\n")
+            continue
+
+        print("FINAL ANSWER FROM THE MODEL:")
+        print(answer)
+        print()

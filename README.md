@@ -72,10 +72,54 @@ uv sync
 cp .env.example .env      # then fill in GEMINI_API_KEY
 ```
 
-**From a net monthly income** (works out the maximum mortgage, payment and
-interest):
+**Interactive** — run it with no arguments and it asks you for the question:
+
+```
+$ uv run main.py
+
+BACKEND: gemini, model gemini-3.7-flash
+
+Ask a mortgage question in your own words. Examples:
+  - My net monthly income is 2000 EUR, how big a mortgage can I get?
+  - I earn 2500 net and already owe 40000. What can I still borrow over 25 years?
+  - How much interest would I pay on a 50000 EUR loan over 10 years at 6%?
+
+Your question (blank to quit): I earn 2200 net and already owe 30000. What can I still borrow?
+
+[step 1] TOOL CALL: max_mortgage
+         arguments: {'net_monthly_income': 2200, 'existing_mortgages': 30000}
+         result:    {'legal_cap_total': 211200, 'max_mortgage': 181200, ...}
+
+[step 2] TOOL CALL: monthly_payment
+         arguments: {'principal': 181200, 'interest_rate': 4.9, 'years': 30}
+         result:    {'monthly_payment': 961.68, ...}
+
+[step 3] TOOL CALL: total_cost
+         result:    {'total_paid': 346204.8, 'total_interest': 165004.8, ...}
+
+[step 4] model wants no more tools, leaving the loop
+
+FINAL ANSWER FROM THE MODEL:
+- Maximum mortgage: €181,200
+- Monthly payment: €961.68
+- Total interest over 30 years: €165,004.80
+- Repayment term: 30 years (assumed)
+
+Assumptions used: annual interest rate of 4.9% and a 30-year term.
+
+Your question (blank to quit):
+```
+
+The model works the numbers out of plain language itself; nothing has to be
+typed in a fixed format. Ask as many questions as you like — a blank line,
+`exit` or Ctrl+C ends the session. If the API fails on one question, the
+session says so and returns to the prompt rather than dying.
+
+**Non-interactive** — give the question up front and it answers once and exits,
+which is what you want from a script or a CI job:
 
 ```bash
+uv run main.py "How much interest would I pay on a 50000 EUR loan over 10 years at 6%?"
 uv run main.py --income 2000
 uv run main.py --income 2000 --debts 50000
 uv run main.py --income 2500 --rate 5.2 --years 25
@@ -88,6 +132,9 @@ uv run main.py --income 2500 --rate 5.2 --years 25
 | `--rate` | annual interest rate in percent | 4.9 |
 | `--years` | repayment term in years | 30 |
 
+The `--income` flags just assemble a question for you. Anything they can ask,
+you can also type in your own words.
+
 Existing mortgages are subtracted because the legal cap applies to the **sum of
 all** mortgages a person holds:
 
@@ -99,12 +146,6 @@ $ uv run main.py --income 2000 --debts 50000
                           'max_mortgage': 142000}
 [step 2] monthly_payment(142000, 4.9, 30)  → 753.63 EUR
 [step 3] total_cost(753.63, 30, 142000)    → 129,306.80 EUR interest
-```
-
-**A free-text question** instead of the flags:
-
-```bash
-uv run main.py "How much interest would I pay on a 50 000 EUR loan over 10 years at 6%?"
 ```
 
 Get a key at <https://aistudio.google.com/apikey>. The `.env` file is in
